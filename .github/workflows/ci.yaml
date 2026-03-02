@@ -1,0 +1,270 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      contracts: ${{ steps.filter.outputs.contracts }}
+      bff: ${{ steps.filter.outputs.bff }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      llm: ${{ steps.filter.outputs.llm }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            contracts:
+              - 'contracts/**'
+            bff:
+              - 'services/bff/**'
+            gateway:
+              - 'services/gateway/**'
+            llm:
+              - 'services/llm/**'
+            frontend:
+              - 'frontend/**'
+
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: contracts/generated/go.mod
+          cache-dependency-path: contracts/generated/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: contracts/generated/pnpm-lock.yaml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Buf
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Install JS codegen dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: contracts/generated
+
+      - name: Install Go codegen dependencies
+        run: go mod download
+        working-directory: contracts/generated
+
+      - name: buf lint
+        run: buf lint
+        working-directory: contracts
+
+      - name: Verify generated contracts are up to date
+        run: |
+          buf generate
+          git diff --exit-code -- generated
+        working-directory: contracts
+
+  bff:
+    name: bff
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.bff == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/bff/go.mod
+          cache-dependency-path: |
+            services/bff/go.sum
+            contracts/generated/go.sum
+            db/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+        working-directory: services/bff
+
+      - name: go vet
+        run: go vet ./...
+        working-directory: services/bff
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          working-directory: services/bff
+
+      - name: go test
+        run: go test ./...
+        working-directory: services/bff
+
+  gateway:
+    name: gateway
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/gateway/go.mod
+          cache-dependency-path: |
+            services/gateway/go.sum
+            contracts/generated/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+        working-directory: services/gateway
+
+      - name: go vet
+        run: go vet ./...
+        working-directory: services/gateway
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          working-directory: services/gateway
+
+      - name: go test
+        run: go test ./...
+        working-directory: services/gateway
+
+  llm:
+    name: llm
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.llm == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/llm/go.mod
+          cache-dependency-path: |
+            services/llm/go.sum
+            contracts/generated/go.sum
+            db/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+        working-directory: services/llm
+
+      - name: go vet
+        run: go vet ./...
+        working-directory: services/llm
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          working-directory: services/llm
+
+      - name: go test
+        run: go test ./...
+        working-directory: services/llm
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+
+      - name: eslint
+        run: pnpm exec eslint .
+        working-directory: frontend
+
+      - name: vue-tsc --noEmit
+        run: pnpm exec vue-tsc --noEmit
+        working-directory: frontend
+
+      - name: vitest
+        run: pnpm dlx vitest run --passWithNoTests
+        working-directory: frontend
+
+  ci-status:
+    name: ci-status
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - contracts
+      - bff
+      - gateway
+      - llm
+      - frontend
+    steps:
+      - name: Check jobs result
+        run: |
+          set -euo pipefail
+
+          results=(
+            "contracts=${{ needs.contracts.result }}"
+            "bff=${{ needs.bff.result }}"
+            "gateway=${{ needs.gateway.result }}"
+            "llm=${{ needs.llm.result }}"
+            "frontend=${{ needs.frontend.result }}"
+          )
+
+          for item in "${results[@]}"; do
+            name="${item%%=*}"
+            result="${item##*=}"
+            echo "${name}: ${result}"
+
+            if [ "${result}" = "failure" ] || [ "${result}" = "cancelled" ]; then
+              echo "Job ${name} did not pass"
+              exit 1
+            fi
+          done
